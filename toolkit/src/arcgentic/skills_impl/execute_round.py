@@ -256,7 +256,13 @@ def _run_ocr_delegate_mode(adapter: IDEAdapter, repo_root: Path) -> tuple[str, s
     if not isinstance(preview, dict):
         return "", "ocr pre-filter skipped: ocr delegate preview produced invalid JSON"
 
-    files = [f["path"] for f in preview.get("reviewable_files", [])]
+    raw_files = preview.get("reviewable_files")
+    if not isinstance(raw_files, list):
+        return "", "ocr pre-filter skipped: ocr delegate preview produced invalid JSON"
+    try:
+        files = [f["path"] for f in raw_files]
+    except (KeyError, TypeError):
+        return "", "ocr pre-filter skipped: ocr delegate preview produced invalid JSON"
     if not files:
         # A round that only touches docs/tests can legitimately have zero
         # reviewable files — that is ocr working correctly, not a failure.

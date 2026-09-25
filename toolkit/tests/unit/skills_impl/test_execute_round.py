@@ -1373,3 +1373,20 @@ def test_ocr_prefilter_delegate_mode_truncates_oversized_guidance(
     assert warning is None
     assert len(section) < 25_000
     assert "[truncated]" in section
+
+
+def test_ocr_prefilter_delegate_mode_malformed_entry_warns_not_crashes(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """Valid JSON whose reviewable_files entries lack the expected shape (e.g.
+    a schema change upstream) degrades to a warning instead of raising —
+    never blocks the round."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    malformed_preview = '{"reviewable_files": [{"status": "modified"}]}'
+    stub = _MultiStubAdapter(
+        canned_outputs={},
+        shell_overrides={"ocr delegate preview": (malformed_preview, 0)},
+    )
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert section == ""
+    assert warning is not None
