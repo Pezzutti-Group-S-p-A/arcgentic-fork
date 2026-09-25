@@ -33,6 +33,7 @@ from arcgentic.skills_impl.execute_round import (
     _phase_dev_body,
     _phase_entry_admin,
     _round_to_upper,
+    _run_ocr_prefilter,
     _run_quality_gates,
     run,
 )
@@ -1075,3 +1076,74 @@ def test_mandate_20_allows_benign_ba_design_substring(tmp_path: Path) -> None:
     )
     # Should NOT raise; benign substring != round-specific marker R10_L3_ALETHEIA_BA_DESIGN
     assert result.exit_code == 0, result.error
+
+
+# ---------------------------------------------------------------------------
+# ocr pre-filter helper
+# ---------------------------------------------------------------------------
+
+
+def test_ocr_prefilter_disabled_by_default(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """When ARCGENTIC_OCR_PREFILTER is unset, the pre-filter is a no-op."""
+    monkeypatch.delenv("ARCGENTIC_OCR_PREFILTER", raising=False)
+    stub = _MultiStubAdapter(canned_outputs={})
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert section == ""
+    assert warning is None
+
+
+def test_ocr_prefilter_ignores_near_miss_env_values(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """Only the literal string '1' enables the pre-filter — 'true' must not."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "true")
+    stub = _MultiStubAdapter(
+        canned_outputs={},
+        shell_overrides={"ocr review": ("should not be seen", 0)},
+    )
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert section == ""
+    assert warning is None
+
+
+def test_ocr_prefilter_appends_findings_when_enabled(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """When enabled and ocr succeeds, its output is wrapped in a labeled section."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    stub = _MultiStubAdapter(
+        canned_outputs={},
+        shell_overrides={"ocr review": ("file.py:12 possible off-by-one", 0)},
+    )
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert "OCR PRE-FILTER FINDINGS" in section
+    assert "file.py:12 possible off-by-one" in section
+    assert warning is None
+
+
+def test_ocr_prefilter_warns_on_nonzero_exit(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """A non-zero ocr exit code is a soft warning, not a raised error."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    stub = _MultiStubAdapter(
+        canned_outputs={},
+        shell_overrides={"ocr review": ("ocr: command not found", 127)},
+    )
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert section == ""
+    assert warning is not None
+    assert "127" in warning
+
+
+def test_ocr_prefilter_warns_on_empty_output(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """A zero exit code with no output is treated as unavailable, not as zero findings."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    stub = _MultiStubAdapter(canned_outputs={}, shell_overrides={"ocr review": ("", 0)})
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert section == ""
+    assert warning is not None

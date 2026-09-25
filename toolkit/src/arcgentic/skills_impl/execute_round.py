@@ -15,6 +15,7 @@ Spec reference: docs/plans/2026-05-13-arcgentic-v0.2.0-spec.md § 4.2
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -200,6 +201,36 @@ def _run_quality_gates(
     _, code = adapter.shell(f"cd {rr_toolkit} && ruff check .")
     results["ruff"] = "PASS" if code == 0 else "FAIL"
     return results
+
+
+def _run_ocr_prefilter(adapter: IDEAdapter, repo_root: Path) -> tuple[str, str | None]:
+    """Run the open-code-review pre-filter on the workspace diff, if enabled.
+
+    Controlled by ARCGENTIC_OCR_PREFILTER (opt-in; only the literal "1" enables
+    it — unset or any other value leaves this a no-op). Never raises: any
+    failure degrades to a warning and an empty section, so callers can fall
+    back to today's cr_brief construction unchanged.
+
+    Returns (section_text, warning):
+    - section_text: "" when disabled/unavailable/failed, otherwise a labeled
+      block ready to append to the cr-reviewer brief.
+    - warning: None on success or when disabled; a one-line reason otherwise.
+    """
+    if os.environ.get("ARCGENTIC_OCR_PREFILTER") != "1":
+        return "", None
+
+    rr = shquote(str(repo_root))
+    stdout, code = adapter.shell(f"cd {rr} && ocr review", timeout_seconds=120)
+    if code != 0:
+        return "", f"ocr pre-filter skipped: ocr review exited {code}"
+    findings = stdout.strip()
+    if not findings:
+        return "", "ocr pre-filter skipped: ocr review produced no output"
+    section = (
+        "\n\nOCR PRE-FILTER FINDINGS (verify each against the diff and BA "
+        "design; do not re-derive independently):\n\n" + findings
+    )
+    return section, None
 
 
 def _compose_self_audit_skeleton(
