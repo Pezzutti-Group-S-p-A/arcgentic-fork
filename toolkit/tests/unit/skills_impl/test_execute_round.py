@@ -1113,8 +1113,14 @@ def test_ocr_prefilter_ignores_near_miss_env_values(
 def test_ocr_prefilter_appends_findings_when_enabled(
     tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
 ) -> None:
-    """When enabled and ocr succeeds, its output is wrapped in a labeled section."""
+    """When enabled and ocr succeeds, its output is wrapped in a labeled section.
+
+    Pins review mode explicitly: delegate mode (no API key needed) is the
+    default now, so review mode (needs a configured provider + key) is
+    reached only via ARCGENTIC_OCR_MODE=review.
+    """
     monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    monkeypatch.setenv("ARCGENTIC_OCR_MODE", "review")
     stub = _MultiStubAdapter(
         canned_outputs={},
         shell_overrides={"ocr review": ("file.py:12 possible off-by-one", 0)},
@@ -1130,6 +1136,7 @@ def test_ocr_prefilter_warns_on_nonzero_exit(
 ) -> None:
     """A non-zero ocr exit code is a soft warning, not a raised error."""
     monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    monkeypatch.setenv("ARCGENTIC_OCR_MODE", "review")
     stub = _MultiStubAdapter(
         canned_outputs={},
         shell_overrides={"ocr review": ("ocr: command not found", 127)},
@@ -1145,6 +1152,7 @@ def test_ocr_prefilter_warns_on_empty_output(
 ) -> None:
     """A zero exit code with no output is treated as unavailable, not as zero findings."""
     monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    monkeypatch.setenv("ARCGENTIC_OCR_MODE", "review")
     stub = _MultiStubAdapter(canned_outputs={}, shell_overrides={"ocr review": ("", 0)})
     section, warning = _run_ocr_prefilter(stub, tmp_path)
     assert section == ""
@@ -1183,6 +1191,7 @@ def test_ocr_prefilter_section_reaches_cr_reviewer_prompt(
 ) -> None:
     """When enabled, ocr's findings are appended to the actual cr-reviewer brief."""
     monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    monkeypatch.setenv("ARCGENTIC_OCR_MODE", "review")
     stub = _make_default_stub(
         shell_overrides={"ocr review": ("file.py:9 unchecked null deref", 0)},
     )
@@ -1200,6 +1209,7 @@ def test_ocr_prefilter_failure_surfaces_as_warning_not_error(
 ) -> None:
     """A broken ocr install degrades to a warning; the round still succeeds."""
     monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    monkeypatch.setenv("ARCGENTIC_OCR_MODE", "review")
     stub = _make_default_stub(
         shell_overrides={"ocr review": ("ocr: command not found", 127)},
     )
@@ -1219,9 +1229,145 @@ def test_ocr_prefilter_truncates_oversized_output(
     downstream `claude -p <brief>` argv (Windows CreateProcess caps around 32KB;
     cr_brief already carries full dev output + BA design on top of this)."""
     monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    monkeypatch.setenv("ARCGENTIC_OCR_MODE", "review")
     huge_output = "x" * 100_000
     stub = _MultiStubAdapter(
         canned_outputs={}, shell_overrides={"ocr review": (huge_output, 0)}
+    )
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert warning is None
+    assert len(section) < 25_000
+    assert "[truncated]" in section
+
+
+# ---------------------------------------------------------------------------
+# ocr pre-filter — delegate mode (default; no LLM API key needed)
+# ---------------------------------------------------------------------------
+
+
+_DELEGATE_PREVIEW_ONE_FILE = """\
+{
+  "schema_version": "1",
+  "mode": "workspace",
+  "reviewable_count": 1,
+  "excluded_count": 0,
+  "reviewable_files": [
+    {"path": "src/thing.py", "status": "modified", "insertions": 5, "deletions": 1}
+  ],
+  "excluded_files": []
+}
+"""
+
+_DELEGATE_PREVIEW_ZERO_FILES = """\
+{
+  "schema_version": "1",
+  "mode": "workspace",
+  "reviewable_count": 0,
+  "excluded_count": 2,
+  "reviewable_files": [],
+  "excluded_files": [
+    {"path": "README.md", "status": "modified", "insertions": 3, "deletions": 0,
+     "exclude_reason": "unsupported_ext"}
+  ]
+}
+"""
+
+
+def test_ocr_prefilter_delegate_is_default_mode(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """With ARCGENTIC_OCR_PREFILTER=1 and no MODE set, delegate mode runs —
+    no API key needed, uses the host agent's own session for the actual review."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    monkeypatch.delenv("ARCGENTIC_OCR_MODE", raising=False)
+    stub = _MultiStubAdapter(
+        canned_outputs={},
+        shell_overrides={
+            "ocr delegate preview": (_DELEGATE_PREVIEW_ONE_FILE, 0),
+            "ocr delegate rule": ("### Rule Group 1\n\nCheck for off-by-one errors.", 0),
+        },
+    )
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert warning is None
+    assert "OCR DELEGATE REVIEW GUIDANCE" in section
+    assert "src/thing.py" in section
+    assert "Check for off-by-one errors." in section
+
+
+def test_ocr_prefilter_delegate_mode_no_reviewable_files_is_not_a_warning(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """Zero reviewable files (e.g. a docs-only round) is a normal outcome,
+    not a broken-install warning — ocr ran fine and correctly found nothing
+    in scope."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    stub = _MultiStubAdapter(
+        canned_outputs={},
+        shell_overrides={"ocr delegate preview": (_DELEGATE_PREVIEW_ZERO_FILES, 0)},
+    )
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert section == ""
+    assert warning is None
+
+
+def test_ocr_prefilter_delegate_mode_preview_failure_warns(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """A broken ocr install (preview step fails) degrades to a warning."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    stub = _MultiStubAdapter(
+        canned_outputs={},
+        shell_overrides={"ocr delegate preview": ("ocr: command not found", 127)},
+    )
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert section == ""
+    assert warning is not None
+    assert "127" in warning
+
+
+def test_ocr_prefilter_delegate_mode_invalid_json_warns(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """Exit 0 but unparseable output is a warning, not a crash."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    stub = _MultiStubAdapter(
+        canned_outputs={},
+        shell_overrides={"ocr delegate preview": ("not json at all", 0)},
+    )
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert section == ""
+    assert warning is not None
+
+
+def test_ocr_prefilter_delegate_mode_rule_failure_warns(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """Preview succeeds but the rule step fails — still degrades to a warning."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    stub = _MultiStubAdapter(
+        canned_outputs={},
+        shell_overrides={
+            "ocr delegate preview": (_DELEGATE_PREVIEW_ONE_FILE, 0),
+            "ocr delegate rule": ("boom", 1),
+        },
+    )
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert section == ""
+    assert warning is not None
+
+
+def test_ocr_prefilter_delegate_mode_truncates_oversized_guidance(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """A huge rule-guidance document is capped the same way review mode is."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    huge_guidance = "y" * 100_000
+    stub = _MultiStubAdapter(
+        canned_outputs={},
+        shell_overrides={
+            "ocr delegate preview": (_DELEGATE_PREVIEW_ONE_FILE, 0),
+            "ocr delegate rule": (huge_guidance, 0),
+        },
     )
     section, warning = _run_ocr_prefilter(stub, tmp_path)
     assert warning is None

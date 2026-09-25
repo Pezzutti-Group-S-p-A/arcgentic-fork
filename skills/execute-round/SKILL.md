@@ -21,10 +21,11 @@ Requires the `arcgentic` CLI:
 - Stable (this fork, includes the ocr pre-filter patch): `pipx install "git+https://github.com/Pezzutti-Group-S-p-A/arcgentic-fork.git#subdirectory=toolkit"`
 - Dev: `cd toolkit && pip install -e ".[dev]"`
 
-Optional: set `ARCGENTIC_OCR_PREFILTER=1` (with `ocr` installed and its
-Anthropic key supplied via `pzt-secret`) to enable the ocr pre-filter on the
-inline CR step. See README.md § "ocr pre-filter" for setup. Unset by
-default — no behavior change if you skip this.
+Optional: set `ARCGENTIC_OCR_PREFILTER=1` (with `ocr` installed) to enable
+the ocr pre-filter on the inline CR step — defaults to delegate mode, which
+needs no API key. See README.md § "ocr pre-filter" for setup and the
+review-mode alternative. Unset by default — no behavior change if you skip
+this.
 
 Requires a planned handoff doc — run `/plan-round` first if missing.
 

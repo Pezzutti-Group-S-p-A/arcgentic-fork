@@ -35,18 +35,32 @@ findings table. Expected finding count: 3-7.
 
 ## OCR pre-filter (optional)
 
-Some briefs include an `OCR PRE-FILTER FINDINGS` section after the BA design
-text — output from `open-code-review`'s deterministic diff scan, run before
-you were dispatched. When present:
+Some briefs include one extra section after the BA design text, from
+`open-code-review`, run before you were dispatched. Its heading tells you
+which of the two modes produced it:
+
+**`OCR PRE-FILTER FINDINGS`** — candidate findings from a real LLM call
+`ocr` made itself (review mode). When present:
 
 - Verify each listed finding against the actual diff and the BA design:
   confirm it, adjust its severity, or reject it as a false positive.
 - Do NOT perform an independent from-scratch scan of file regions the
   pre-filter already covered — spend your reasoning on verification and on
   dimensions/regions it did not cover, not on rediscovering the same lines.
-- Still self-enforce the existing quality bar below (4-dimensional coverage,
-  3-7 findings, concrete file:line references) — the pre-filter narrows
-  where you look, it does not change what "done" means.
+
+**`OCR DELEGATE REVIEW GUIDANCE`** — no LLM call was made for this one;
+`ocr` only picked the reviewable files and matched them against its rule
+set. When present:
+
+- Apply the listed checklist yourself, against the listed files, as part of
+  your own review — it is guidance for you to execute, not a set of
+  findings to verify.
+- Files it lists as in scope narrow where to look; they do not replace
+  reviewing the diff against the BA design for correctness.
+
+Either way: still self-enforce the existing quality bar below
+(4-dimensional coverage, 3-7 findings, concrete file:line references) — the
+pre-filter narrows where you look, it does not change what "done" means.
 
 When no such section is present in the brief, proceed exactly as documented
 below.

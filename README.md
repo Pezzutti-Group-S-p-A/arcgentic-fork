@@ -167,36 +167,54 @@ arcgentic --help
 ### ocr pre-filter (optional, this fork only)
 
 `execute-round`'s inline CR step can run
-[open-code-review](https://github.com/alibaba/open-code-review) (`ocr`) as a
-deterministic pre-filter before dispatching `cr-reviewer`, cutting review
-tokens by having the agent verify candidate findings instead of scanning the
-diff cold. It is off by default and never blocks a round if missing or
-broken.
+[open-code-review](https://github.com/alibaba/open-code-review) (`ocr`)
+before dispatching `cr-reviewer`, to cut review tokens. It is off by
+default and never blocks a round if missing or broken. Two modes, set via
+`ARCGENTIC_OCR_MODE`:
+
+- **`delegate` (default, no API key)** — `ocr` only does deterministic file
+  selection + rule matching; no LLM call, no cost. The resulting checklist
+  is handed to `cr-reviewer`, which applies it using the same Claude Code
+  session/subscription that dispatched it. This is the mode to use out of
+  the box.
+- **`review`** — `ocr` calls a configured LLM provider itself (Anthropic,
+  Gemini, or any of `ocr llm providers`) and returns candidate findings.
+  Needs a provider + API key configured (see below). Useful if you already
+  have a provider key you want ocr to spend directly, e.g. an existing
+  Gemini key.
 
 Setup, once per machine:
 
 ```bash
-npm install -g @alibaba-group/open-code-review
-ocr config provider   # select Anthropic
-ocr config model      # select Claude Haiku
+npm install -g --allow-scripts=@alibaba-group/open-code-review @alibaba-group/open-code-review
 ```
 
-The Anthropic API key `ocr` uses must come from `pzt-secret` — never placed
-in `ocr`'s config file or any committed file:
+That alone is enough for delegate mode (the default) — no provider, no key.
+
+To turn the pre-filter on for a round (delegate mode):
 
 ```bash
-pzt-secret run --env ANTHROPIC_API_KEY=anthropic-ocr-prefilter -- ocr review
+ARCGENTIC_OCR_PREFILTER=1 arcgentic execute-round-impl --round=$ROUND --handoff=$HANDOFF_PATH
 ```
 
-To turn the pre-filter on for a round:
+To use review mode instead, configure a provider first:
 
 ```bash
-ARCGENTIC_OCR_PREFILTER=1 pzt-secret run --env ANTHROPIC_API_KEY=anthropic-ocr-prefilter -- arcgentic execute-round-impl --round=$ROUND --handoff=$HANDOFF_PATH
+ocr config provider   # e.g. select Anthropic or Gemini
+ocr config model
 ```
 
-If the secret `anthropic-ocr-prefilter` does not yet exist in `kv-pzt-agent`,
-create it via `pzt-secret put` (tags: `owner=alberto.camilli`, `rotation`,
-`source=anthropic-console`) before enabling the env var.
+The provider's API key must come from `pzt-secret` — never placed in
+`ocr`'s config file or any committed file:
+
+```bash
+ARCGENTIC_OCR_PREFILTER=1 ARCGENTIC_OCR_MODE=review pzt-secret run --env ANTHROPIC_API_KEY=anthropic-ocr-prefilter -- arcgentic execute-round-impl --round=$ROUND --handoff=$HANDOFF_PATH
+```
+
+If the secret does not yet exist in `kv-pzt-agent`, create it via
+`pzt-secret put` (tags: `owner=alberto.camilli`, `rotation`,
+`source=anthropic-console` or `source=google-ai-studio` for Gemini) before
+enabling the env var.
 
 ## Minimal example
 

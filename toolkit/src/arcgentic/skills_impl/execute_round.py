@@ -15,6 +15,7 @@ Spec reference: docs/plans/2026-05-13-arcgentic-v0.2.0-spec.md § 4.2
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -206,28 +207,23 @@ def _run_quality_gates(
 _OCR_FINDINGS_MAX_CHARS = 20_000
 
 
-def _run_ocr_prefilter(adapter: IDEAdapter, repo_root: Path) -> tuple[str, str | None]:
-    """Run the open-code-review pre-filter on the workspace diff, if enabled.
+def _cap_ocr_text(text: str) -> str:
+    """Cap ocr output at _OCR_FINDINGS_MAX_CHARS.
 
-    Controlled by ARCGENTIC_OCR_PREFILTER (opt-in; only the literal "1" enables
-    it — unset or any other value leaves this a no-op). Never raises: any
-    failure degrades to a warning and an empty section, so callers can fall
-    back to today's cr_brief construction unchanged.
-
-    Findings are capped at _OCR_FINDINGS_MAX_CHARS: cr_brief already carries
-    full dev output + BA design, and ClaudeCodeAdapter.dispatch_agent passes
-    the whole brief as one `claude -p <arg>` argument — an unbounded ocr
-    output could push that argv past platform limits (e.g. Windows
-    CreateProcess) and crash the dispatch instead of degrading gracefully.
-
-    Returns (section_text, warning):
-    - section_text: "" when disabled/unavailable/failed, otherwise a labeled
-      block ready to append to the cr-reviewer brief.
-    - warning: None on success or when disabled; a one-line reason otherwise.
+    cr_brief already carries full dev output + BA design, and
+    ClaudeCodeAdapter.dispatch_agent passes the whole brief as one
+    `claude -p <arg>` argument — an unbounded ocr output could push that
+    argv past platform limits (e.g. Windows CreateProcess) and crash the
+    dispatch instead of degrading gracefully.
     """
-    if os.environ.get("ARCGENTIC_OCR_PREFILTER") != "1":
-        return "", None
+    if len(text) > _OCR_FINDINGS_MAX_CHARS:
+        return text[:_OCR_FINDINGS_MAX_CHARS] + "\n\n[truncated]"
+    return text
 
+
+def _run_ocr_review_mode(adapter: IDEAdapter, repo_root: Path) -> tuple[str, str | None]:
+    """ocr review: calls a configured LLM provider directly (needs an API key
+    via `ocr config provider`/`ocr config set providers.<name>.api_key`)."""
     rr = shquote(str(repo_root))
     stdout, code = adapter.shell(f"cd {rr} && ocr review", timeout_seconds=120)
     if code != 0:
@@ -235,13 +231,80 @@ def _run_ocr_prefilter(adapter: IDEAdapter, repo_root: Path) -> tuple[str, str |
     findings = stdout.strip()
     if not findings:
         return "", "ocr pre-filter skipped: ocr review produced no output"
-    if len(findings) > _OCR_FINDINGS_MAX_CHARS:
-        findings = findings[:_OCR_FINDINGS_MAX_CHARS] + "\n\n[truncated]"
     section = (
         "\n\nOCR PRE-FILTER FINDINGS (verify each against the diff and BA "
-        "design; do not re-derive independently):\n\n" + findings
+        "design; do not re-derive independently):\n\n" + _cap_ocr_text(findings)
     )
     return section, None
+
+
+def _run_ocr_delegate_mode(adapter: IDEAdapter, repo_root: Path) -> tuple[str, str | None]:
+    """ocr delegate: ocr does deterministic file selection + rule matching only
+    (no LLM call, no API key) and hands a review checklist to the host
+    agent — here, the cr-reviewer dispatch that already runs on the caller's
+    own Claude Code session/subscription."""
+    rr = shquote(str(repo_root))
+    stdout, code = adapter.shell(
+        f"cd {rr} && ocr delegate preview --format json", timeout_seconds=120
+    )
+    if code != 0:
+        return "", f"ocr pre-filter skipped: ocr delegate preview exited {code}"
+    try:
+        preview = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return "", "ocr pre-filter skipped: ocr delegate preview produced invalid JSON"
+    if not isinstance(preview, dict):
+        return "", "ocr pre-filter skipped: ocr delegate preview produced invalid JSON"
+
+    files = [f["path"] for f in preview.get("reviewable_files", [])]
+    if not files:
+        # A round that only touches docs/tests can legitimately have zero
+        # reviewable files — that is ocr working correctly, not a failure.
+        return "", None
+
+    file_args = " ".join(shquote(f) for f in files)
+    stdout, code = adapter.shell(
+        f"cd {rr} && ocr delegate rule {file_args}", timeout_seconds=120
+    )
+    if code != 0:
+        return "", f"ocr pre-filter skipped: ocr delegate rule exited {code}"
+    guidance = stdout.strip()
+    if not guidance:
+        return "", "ocr pre-filter skipped: ocr delegate rule produced no output"
+
+    file_list = "\n".join(f"- {f}" for f in files)
+    section = (
+        "\n\nOCR DELEGATE REVIEW GUIDANCE (apply this checklist yourself while "
+        "reviewing the files below — no external LLM generated it):\n\n"
+        f"Files:\n{file_list}\n\n" + _cap_ocr_text(guidance)
+    )
+    return section, None
+
+
+def _run_ocr_prefilter(adapter: IDEAdapter, repo_root: Path) -> tuple[str, str | None]:
+    """Run the open-code-review pre-filter on the workspace diff, if enabled.
+
+    Controlled by ARCGENTIC_OCR_PREFILTER (opt-in; only the literal "1" enables
+    it — unset or any other value leaves this a no-op) and ARCGENTIC_OCR_MODE
+    ("delegate", the default — no API key needed; or "review" — calls a
+    configured LLM provider directly). Never raises: any failure degrades to
+    a warning and an empty section, so callers can fall back to today's
+    cr_brief construction unchanged.
+
+    Returns (section_text, warning):
+    - section_text: "" when disabled/unavailable/failed, otherwise a labeled
+      block ready to append to the cr-reviewer brief.
+    - warning: None on success, when disabled, or when delegate mode found
+      zero reviewable files (a legitimate outcome, not a failure); a
+      one-line reason otherwise.
+    """
+    if os.environ.get("ARCGENTIC_OCR_PREFILTER") != "1":
+        return "", None
+
+    mode = os.environ.get("ARCGENTIC_OCR_MODE", "delegate")
+    if mode == "review":
+        return _run_ocr_review_mode(adapter, repo_root)
+    return _run_ocr_delegate_mode(adapter, repo_root)
 
 
 def _compose_self_audit_skeleton(
