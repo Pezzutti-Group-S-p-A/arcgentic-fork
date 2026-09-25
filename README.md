@@ -160,7 +160,7 @@ Use this if you only need the command-line helper. Install from this fork
 (not the upstream PyPI package) to get the ocr pre-filter patch:
 
 ```bash
-pipx install git+https://github.com/Pezzutti-Group-S-p-A/arcgentic-fork.git
+pipx install "git+https://github.com/Pezzutti-Group-S-p-A/arcgentic-fork.git#subdirectory=toolkit"
 arcgentic --help
 ```
 

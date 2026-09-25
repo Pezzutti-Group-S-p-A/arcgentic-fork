@@ -203,6 +203,9 @@ def _run_quality_gates(
     return results
 
 
+_OCR_FINDINGS_MAX_CHARS = 20_000
+
+
 def _run_ocr_prefilter(adapter: IDEAdapter, repo_root: Path) -> tuple[str, str | None]:
     """Run the open-code-review pre-filter on the workspace diff, if enabled.
 
@@ -210,6 +213,12 @@ def _run_ocr_prefilter(adapter: IDEAdapter, repo_root: Path) -> tuple[str, str |
     it — unset or any other value leaves this a no-op). Never raises: any
     failure degrades to a warning and an empty section, so callers can fall
     back to today's cr_brief construction unchanged.
+
+    Findings are capped at _OCR_FINDINGS_MAX_CHARS: cr_brief already carries
+    full dev output + BA design, and ClaudeCodeAdapter.dispatch_agent passes
+    the whole brief as one `claude -p <arg>` argument — an unbounded ocr
+    output could push that argv past platform limits (e.g. Windows
+    CreateProcess) and crash the dispatch instead of degrading gracefully.
 
     Returns (section_text, warning):
     - section_text: "" when disabled/unavailable/failed, otherwise a labeled
@@ -226,6 +235,8 @@ def _run_ocr_prefilter(adapter: IDEAdapter, repo_root: Path) -> tuple[str, str |
     findings = stdout.strip()
     if not findings:
         return "", "ocr pre-filter skipped: ocr review produced no output"
+    if len(findings) > _OCR_FINDINGS_MAX_CHARS:
+        findings = findings[:_OCR_FINDINGS_MAX_CHARS] + "\n\n[truncated]"
     section = (
         "\n\nOCR PRE-FILTER FINDINGS (verify each against the diff and BA "
         "design; do not re-derive independently):\n\n" + findings

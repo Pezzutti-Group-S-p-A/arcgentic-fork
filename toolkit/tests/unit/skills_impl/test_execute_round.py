@@ -1210,3 +1210,20 @@ def test_ocr_prefilter_failure_surfaces_as_warning_not_error(
     assert "ocr pre-filter skipped" in ocr_warning
     cr_prompt = stub._dispatched_prompts["cr-reviewer"]
     assert "OCR PRE-FILTER" not in cr_prompt
+
+
+def test_ocr_prefilter_truncates_oversized_output(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """A huge ocr output is capped so the appended section can't blow up the
+    downstream `claude -p <brief>` argv (Windows CreateProcess caps around 32KB;
+    cr_brief already carries full dev output + BA design on top of this)."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    huge_output = "x" * 100_000
+    stub = _MultiStubAdapter(
+        canned_outputs={}, shell_overrides={"ocr review": (huge_output, 0)}
+    )
+    section, warning = _run_ocr_prefilter(stub, tmp_path)
+    assert warning is None
+    assert len(section) < 25_000
+    assert "[truncated]" in section
