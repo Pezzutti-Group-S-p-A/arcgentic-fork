@@ -21,11 +21,15 @@ Requires the `arcgentic` CLI:
 - Stable (this fork, includes the ocr pre-filter patch): `pipx install "git+https://github.com/Pezzutti-Group-S-p-A/arcgentic-fork.git#subdirectory=toolkit"`
 - Dev: `cd toolkit && pip install -e ".[dev]"`
 
-Optional: set `ARCGENTIC_OCR_PREFILTER=1` (with `ocr` installed) to enable
-the ocr pre-filter on the inline CR step — defaults to delegate mode, which
-needs no API key. See README.md § "ocr pre-filter" for setup and the
-review-mode alternative. Unset by default — no behavior change if you skip
-this.
+The ocr pre-filter on the inline CR step is **on by default** in this
+skill's own invocation below (`ARCGENTIC_OCR_PREFILTER=1`, delegate mode —
+no API key needed). If `ocr` is not installed, or fails, the CLI degrades
+to a warning and runs the round exactly as without it — nothing to set up
+to get this skill working, and nothing breaks if `ocr` is missing. See
+README.md § "ocr pre-filter" for install and the review-mode alternative
+(needs a provider + API key, e.g. for Gemini). To skip it for one
+invocation, drop the `ARCGENTIC_OCR_PREFILTER=1` prefix from the command in
+Workflow step 2 below.
 
 Requires a planned handoff doc — run `/plan-round` first if missing.
 
@@ -50,9 +54,9 @@ Parse from `$ARGUMENTS`:
 When invoked:
 
 1. Verify the handoff doc exists at `handoff_path`.
-2. Shell out:
+2. Shell out (ocr pre-filter on by default — delegate mode, no API key):
    ```
-   arcgentic execute-round-impl --round=$ROUND --handoff=$HANDOFF_PATH [--dry-run]
+   ARCGENTIC_OCR_PREFILTER=1 arcgentic execute-round-impl --round=$ROUND --handoff=$HANDOFF_PATH [--dry-run]
    ```
 3. The CLI orchestrates 4 phases:
    - **Phase 1 — Entry-admin commit**: commit handoff + state-row updates
