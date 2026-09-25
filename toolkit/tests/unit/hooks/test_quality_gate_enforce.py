@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
+from arcgentic.adapters._local_env import shquote
 from arcgentic.hooks.quality_gate_enforce import (
     GateResult,
     main,
@@ -262,7 +263,9 @@ def test_summary_text_all_fail(tmp_path: Path) -> None:
 
 
 def test_shquote_applied_to_repo_root_with_spaces(tmp_path: Path) -> None:
-    """Commands must single-quote paths — verify shquoted path appears in cmd."""
+    """Commands must shell-quote paths — verify the platform-appropriate
+    shquoted form (single-quoted on POSIX, double-quoted on win32 cmd.exe)
+    appears in the command, not a hardcoded quote style."""
     space_path = tmp_path / "path with spaces"
     space_path.mkdir()
     captured_cmds: list[str] = []
@@ -277,12 +280,10 @@ def test_shquote_applied_to_repo_root_with_spaces(tmp_path: Path) -> None:
     ):
         run(repo_root=space_path, skip_audit_check=True)
 
-    # mypy cmd should contain the single-quoted path
     mypy_cmds = [c for c in captured_cmds if "mypy" in c]
     assert mypy_cmds, "No mypy command captured"
     mypy_cmd = mypy_cmds[0]
-    # Single-quoted: 'path with spaces'
-    assert "'" in mypy_cmd, f"Path not single-quoted in: {mypy_cmd!r}"
+    assert shquote(str(space_path)) in mypy_cmd, f"Path not shquoted in: {mypy_cmd!r}"
     assert "path with spaces" in mypy_cmd
 
 

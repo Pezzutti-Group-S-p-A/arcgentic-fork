@@ -18,6 +18,7 @@ from typing import Literal
 import pytest as _pytest
 
 from arcgentic import __version__
+from arcgentic.adapters import _local_env
 from arcgentic.adapters.base import AgentDispatchResult  # noqa: I001
 from arcgentic.adapters.inline import InlineAdapter
 from arcgentic.audit_check import run as audit_check_run
@@ -1003,9 +1004,16 @@ def test_run_quality_gates_handles_paths_with_spaces(tmp_path: Path) -> None:
     repo_with_space = tmp_path / "Arc Studio" / "arcgentic"
     repo_with_space.mkdir(parents=True, exist_ok=True)
     _run_quality_gates(stub, repo_with_space)
-    # Each captured command must use POSIX-quoting (single quotes) around the spaced path
-    for cmd in captured_commands[:3]:  # first 3 are mypy/pytest/ruff
-        assert "'" in cmd, f"command should be POSIX-quoted: {cmd}"
+    # Each captured command must shell-quote the spaced path — platform-
+    # appropriate quoting (shquote), not a hardcoded POSIX quote style.
+    # mypy runs at repo_root; pytest/ruff run at repo_root/"toolkit".
+    quoted_root = _local_env.shquote(str(repo_with_space))
+    quoted_toolkit = _local_env.shquote(str(repo_with_space / "toolkit"))
+    assert quoted_root in captured_commands[0], captured_commands[0]
+    assert quoted_toolkit in captured_commands[1], captured_commands[1]
+    assert quoted_toolkit in captured_commands[2], captured_commands[2]
+    for cmd in captured_commands[:3]:
+        assert "Arc Studio" in cmd
         assert "Arc Studio" in cmd
 
 

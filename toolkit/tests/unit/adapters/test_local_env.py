@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -207,6 +208,7 @@ def test_git_commit_round_trip(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell quoting semantics")
 def test_shquote_basic() -> None:
     """shquote single-quote-escapes values with embedded single quotes."""
     result = _local_env.shquote("it's")
@@ -219,6 +221,7 @@ def test_shquote_basic() -> None:
     assert "it's" in output
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell quoting semantics")
 def test_shquote_dollar_sign() -> None:
     """shquote prevents shell variable expansion of $VAR."""
     result = _local_env.shquote("$HOME")
@@ -229,3 +232,18 @@ def test_shquote_dollar_sign() -> None:
         text=True,
     )
     assert proc.stdout == "$HOME"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe quoting semantics")
+def test_shquote_windows_cd_with_space(tmp_path: Path) -> None:
+    """On Windows, `cd {shquote(path)}` must actually work — POSIX single-quote
+    escaping is not valid cmd.exe syntax (subprocess.run(shell=True) invokes
+    cmd.exe on win32) and silently breaks every `cd <path> && ...` call,
+    including the ocr pre-filter and the mypy/pytest/ruff quality gates.
+    A path with a space is the case that most visibly needs quoting at all."""
+    spaced_dir = tmp_path / "a b"
+    spaced_dir.mkdir()
+    quoted = _local_env.shquote(str(spaced_dir))
+    out, code = _local_env.shell(f"cd {quoted} && cd")
+    assert code == 0
+    assert str(spaced_dir) in out

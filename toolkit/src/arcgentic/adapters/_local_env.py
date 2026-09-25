@@ -15,6 +15,7 @@ Spec reference: docs/plans/2026-05-13-arcgentic-v0.2.0-spec.md § 3.3–§ 3.5
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -121,5 +122,15 @@ def git_commit(message: str, files: list[str] | None = None) -> str:
 
 
 def shquote(s: str) -> str:
-    """POSIX single-quote escape for safe shell=True interpolation."""
+    """Shell-escape a value for safe shell=True interpolation.
+
+    subprocess.run(..., shell=True) invokes cmd.exe on win32 and /bin/sh
+    elsewhere — the two have incompatible quoting rules (cmd.exe does not
+    treat a leading/trailing `'` as a quote character at all), so this
+    branches on platform rather than assuming POSIX everywhere. `"` is not
+    a legal character in a Windows path/filename, so the doubled-quote
+    fallback below only matters for non-path callers, if any.
+    """
+    if sys.platform == "win32":
+        return '"' + s.replace('"', '""') + '"'
     return "'" + s.replace("'", "'\\''") + "'"
