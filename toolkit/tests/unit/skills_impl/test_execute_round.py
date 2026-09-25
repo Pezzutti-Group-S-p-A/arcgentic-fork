@@ -198,6 +198,7 @@ class _MultiStubAdapter(InlineAdapter):
         self._shell_overrides = shell_overrides or {}
         self._git_commit_sha = git_commit_sha
         self._dispatched: list[str] = []
+        self._dispatched_prompts: dict[str, str] = {}
 
     def dispatch_agent(
         self,
@@ -207,6 +208,7 @@ class _MultiStubAdapter(InlineAdapter):
         isolation: Literal["worktree"] | None = None,
     ) -> AgentDispatchResult:
         self._dispatched.append(agent_name)
+        self._dispatched_prompts[agent_name] = prompt
         return AgentDispatchResult(
             output=self._canned.get(agent_name, ""),
             exit_code=self._exit_codes.get(agent_name, 0),
@@ -1147,3 +1149,64 @@ def test_ocr_prefilter_warns_on_empty_output(
     section, warning = _run_ocr_prefilter(stub, tmp_path)
     assert section == ""
     assert warning is not None
+
+
+# ---------------------------------------------------------------------------
+# ocr pre-filter wiring into the CR dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_ocr_prefilter_disabled_leaves_cr_brief_unchanged(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """Default (env var unset) behavior is unchanged: no section, no warnings.
+
+    Exercises _phase_dev_body directly rather than run() end-to-end: run()'s
+    Phase 4 depends on audit_check, which shells out to POSIX `test -f` via
+    subprocess(shell=True) and cannot pass on Windows (pre-existing, ledgered
+    in this plan's pre-flight — unrelated to this patch). _phase_dev_body is
+    exactly the interface this task changes, so it is the precise unit to
+    assert against.
+    """
+    monkeypatch.delenv("ARCGENTIC_OCR_PREFILTER", raising=False)
+    stub = _make_default_stub()
+    _, _, _, _, _, _, ocr_warning = _phase_dev_body(
+        stub, "R10-L3-aletheia", _CANNED_BA_DESIGN, _MINIMAL_HANDOFF, tmp_path, dry_run=True
+    )
+    assert ocr_warning is None
+    cr_prompt = stub._dispatched_prompts["cr-reviewer"]
+    assert "OCR PRE-FILTER" not in cr_prompt
+
+
+def test_ocr_prefilter_section_reaches_cr_reviewer_prompt(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """When enabled, ocr's findings are appended to the actual cr-reviewer brief."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    stub = _make_default_stub(
+        shell_overrides={"ocr review": ("file.py:9 unchecked null deref", 0)},
+    )
+    _, _, _, _, _, _, ocr_warning = _phase_dev_body(
+        stub, "R10-L3-aletheia", _CANNED_BA_DESIGN, _MINIMAL_HANDOFF, tmp_path, dry_run=True
+    )
+    assert ocr_warning is None
+    cr_prompt = stub._dispatched_prompts["cr-reviewer"]
+    assert "OCR PRE-FILTER FINDINGS" in cr_prompt
+    assert "file.py:9 unchecked null deref" in cr_prompt
+
+
+def test_ocr_prefilter_failure_surfaces_as_warning_not_error(
+    tmp_path: Path, monkeypatch: _pytest.MonkeyPatch
+) -> None:
+    """A broken ocr install degrades to a warning; the round still succeeds."""
+    monkeypatch.setenv("ARCGENTIC_OCR_PREFILTER", "1")
+    stub = _make_default_stub(
+        shell_overrides={"ocr review": ("ocr: command not found", 127)},
+    )
+    _, _, _, _, _, _, ocr_warning = _phase_dev_body(
+        stub, "R10-L3-aletheia", _CANNED_BA_DESIGN, _MINIMAL_HANDOFF, tmp_path, dry_run=True
+    )
+    assert ocr_warning is not None
+    assert "ocr pre-filter skipped" in ocr_warning
+    cr_prompt = stub._dispatched_prompts["cr-reviewer"]
+    assert "OCR PRE-FILTER" not in cr_prompt
