@@ -15,6 +15,11 @@
 [![PyPI](https://img.shields.io/pypi/v/arcgentic.svg)](https://pypi.org/project/arcgentic/)
 [![npm](https://img.shields.io/npm/v/arcgentic.svg)](https://www.npmjs.com/package/arcgentic)
 
+> **This is the Pezzutti Group fork** of upstream Arcgentic. It carries one
+> addition: an opt-in `ocr` (`open-code-review`) pre-filter on the CR gate
+> (see "ocr pre-filter" under Install below). Everything else tracks
+> upstream `Arch1eSUN/Arcgentic` via periodic merges.
+
 Arcgentic helps Codex and Claude Code run software work as a disciplined
 sequence: clarify the idea, plan the work, build it, self-audit it, optionally
 run a realistic user test, audit it independently, then close only when the
@@ -151,12 +156,47 @@ arcgentic claude-code-broker install-hooks \
 
 ### CLI install
 
-Use this if you only need the command-line helper:
+Use this if you only need the command-line helper. Install from this fork
+(not the upstream PyPI package) to get the ocr pre-filter patch:
 
 ```bash
-pipx install arcgentic
+pipx install "git+https://github.com/Pezzutti-Group-S-p-A/arcgentic-fork.git#subdirectory=toolkit"
 arcgentic --help
 ```
+
+### ocr pre-filter (optional, this fork only)
+
+`execute-round`'s inline CR step can run
+[open-code-review](https://github.com/alibaba/open-code-review) (`ocr`) as a
+deterministic pre-filter before dispatching `cr-reviewer`, cutting review
+tokens by having the agent verify candidate findings instead of scanning the
+diff cold. It is off by default and never blocks a round if missing or
+broken.
+
+Setup, once per machine:
+
+```bash
+npm install -g @alibaba-group/open-code-review
+ocr config provider   # select Anthropic
+ocr config model      # select Claude Haiku
+```
+
+The Anthropic API key `ocr` uses must come from `pzt-secret` — never placed
+in `ocr`'s config file or any committed file:
+
+```bash
+pzt-secret run --env ANTHROPIC_API_KEY=anthropic-ocr-prefilter -- ocr review
+```
+
+To turn the pre-filter on for a round:
+
+```bash
+ARCGENTIC_OCR_PREFILTER=1 pzt-secret run --env ANTHROPIC_API_KEY=anthropic-ocr-prefilter -- arcgentic execute-round-impl --round=$ROUND --handoff=$HANDOFF_PATH
+```
+
+If the secret `anthropic-ocr-prefilter` does not yet exist in `kv-pzt-agent`,
+create it via `pzt-secret put` (tags: `owner=alberto.camilli`, `rotation`,
+`source=anthropic-console`) before enabling the env var.
 
 ## Minimal example
 

@@ -15,6 +15,7 @@ Spec reference: docs/plans/2026-05-13-arcgentic-v0.2.0-spec.md § 4.2
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -200,6 +201,47 @@ def _run_quality_gates(
     _, code = adapter.shell(f"cd {rr_toolkit} && ruff check .")
     results["ruff"] = "PASS" if code == 0 else "FAIL"
     return results
+
+
+_OCR_FINDINGS_MAX_CHARS = 20_000
+
+
+def _run_ocr_prefilter(adapter: IDEAdapter, repo_root: Path) -> tuple[str, str | None]:
+    """Run the open-code-review pre-filter on the workspace diff, if enabled.
+
+    Controlled by ARCGENTIC_OCR_PREFILTER (opt-in; only the literal "1" enables
+    it — unset or any other value leaves this a no-op). Never raises: any
+    failure degrades to a warning and an empty section, so callers can fall
+    back to today's cr_brief construction unchanged.
+
+    Findings are capped at _OCR_FINDINGS_MAX_CHARS: cr_brief already carries
+    full dev output + BA design, and ClaudeCodeAdapter.dispatch_agent passes
+    the whole brief as one `claude -p <arg>` argument — an unbounded ocr
+    output could push that argv past platform limits (e.g. Windows
+    CreateProcess) and crash the dispatch instead of degrading gracefully.
+
+    Returns (section_text, warning):
+    - section_text: "" when disabled/unavailable/failed, otherwise a labeled
+      block ready to append to the cr-reviewer brief.
+    - warning: None on success or when disabled; a one-line reason otherwise.
+    """
+    if os.environ.get("ARCGENTIC_OCR_PREFILTER") != "1":
+        return "", None
+
+    rr = shquote(str(repo_root))
+    stdout, code = adapter.shell(f"cd {rr} && ocr review", timeout_seconds=120)
+    if code != 0:
+        return "", f"ocr pre-filter skipped: ocr review exited {code}"
+    findings = stdout.strip()
+    if not findings:
+        return "", "ocr pre-filter skipped: ocr review produced no output"
+    if len(findings) > _OCR_FINDINGS_MAX_CHARS:
+        findings = findings[:_OCR_FINDINGS_MAX_CHARS] + "\n\n[truncated]"
+    section = (
+        "\n\nOCR PRE-FILTER FINDINGS (verify each against the diff and BA "
+        "design; do not re-derive independently):\n\n" + findings
+    )
+    return section, None
 
 
 def _compose_self_audit_skeleton(
@@ -467,11 +509,15 @@ def _phase_dev_body(
     handoff_md: str,
     repo_root: Path,
     dry_run: bool,
-) -> tuple[PhaseResult, dict[str, str], int, int, str, str]:
+) -> tuple[PhaseResult, dict[str, str], int, int, str, str, str | None]:
     """Phase 3: dev body — dispatch developer + run quality gates + inline CR + SE.
 
     Returns (PhaseResult, quality_gates, cr_findings_count, se_findings_count,
-             cr_findings_md, se_findings_md).
+             cr_findings_md, se_findings_md, ocr_warning).
+
+    ocr_warning is None unless the opt-in ocr pre-filter was enabled and
+    failed; when set, it belongs in ExecuteRoundResult.warnings — it never
+    raises.
 
     Mandate #20: SE brief MUST NOT contain ba_design — pass only contract-extracted text.
     """
@@ -503,12 +549,16 @@ def _phase_dev_body(
             f"Phase 3 quality gates failed: {gate_failures}. Re-invoke after fixing."
         )
 
+    # Opt-in ocr pre-filter (ARCGENTIC_OCR_PREFILTER=1) — never blocks the round
+    ocr_section, ocr_warning = _run_ocr_prefilter(adapter, repo_root)
+
     # Inline CR step — sees BA design (per spec § 5.4)
     cr_brief = (
         f"Review the dev-body diff for round {round_name}. BA design was at "
         f"{ba_path}; dev output follows. Produce a "
         f"P0/P1/P2/P3 findings table.\n\nDev output:\n\n{dev_result.output}\n\n"
         f"BA design:\n\n{ba_design}"
+        f"{ocr_section}"
     )
     cr_result = adapter.dispatch_agent(
         agent_name="cr-reviewer",
@@ -558,13 +608,17 @@ def _phase_dev_body(
     se_findings_count = se_findings_md.count("| SE-")
 
     if dry_run:
-        return PhaseResult(
+        phase_result = PhaseResult(
             phase_name="dev-body",
             commit_sha=None,
             files_touched=["<dev-body files; dry_run>"],
             sub_agent_dispatched="developer",
             quality_gates=quality_gates,
-        ), quality_gates, cr_findings_count, se_findings_count, cr_findings_md, se_findings_md
+        )
+        return (
+            phase_result, quality_gates, cr_findings_count, se_findings_count,
+            cr_findings_md, se_findings_md, ocr_warning,
+        )
 
     stdout, _ = adapter.shell(
         f"cd {shquote(str(repo_root))} && git diff --staged --name-only"
@@ -577,13 +631,17 @@ def _phase_dev_body(
         )
     subject = f"feat({round_name}): {round_name} dev body"
     sha = adapter.git_commit(subject)
-    return PhaseResult(
+    phase_result = PhaseResult(
         phase_name="dev-body",
         commit_sha=sha,
         files_touched=files_touched,
         sub_agent_dispatched="developer",
         quality_gates=quality_gates,
-    ), quality_gates, cr_findings_count, se_findings_count, cr_findings_md, se_findings_md
+    )
+    return (
+        phase_result, quality_gates, cr_findings_count, se_findings_count,
+        cr_findings_md, se_findings_md, ocr_warning,
+    )
 
 
 def _phase_state_refresh(
@@ -698,10 +756,12 @@ def run(
         phases.append(p2)
 
         # Phase 3
-        p3, quality_gates, cr_count, se_count, cr_md, se_md = _phase_dev_body(
+        p3, quality_gates, cr_count, se_count, cr_md, se_md, ocr_warning = _phase_dev_body(
             adapter, round_name, ba_design, handoff_md, repo_root, dry_run
         )
         phases.append(p3)
+        if ocr_warning:
+            warnings.append(ocr_warning)
 
         # Phase 4
         p4, audit_check_pass = _phase_state_refresh(
