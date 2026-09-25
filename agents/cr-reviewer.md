@@ -33,6 +33,24 @@ Review the dev-body diff against the BA design doc and produce a P0/P1/P2/P3
 findings table. Expected finding count: 3-7.
 ```
 
+## OCR pre-filter (optional)
+
+Some briefs include an `OCR PRE-FILTER FINDINGS` section after the BA design
+text — output from `open-code-review`'s deterministic diff scan, run before
+you were dispatched. When present:
+
+- Verify each listed finding against the actual diff and the BA design:
+  confirm it, adjust its severity, or reject it as a false positive.
+- Do NOT perform an independent from-scratch scan of file regions the
+  pre-filter already covered — spend your reasoning on verification and on
+  dimensions/regions it did not cover, not on rediscovering the same lines.
+- Still self-enforce the existing quality bar below (4-dimensional coverage,
+  3-7 findings, concrete file:line references) — the pre-filter narrows
+  where you look, it does not change what "done" means.
+
+When no such section is present in the brief, proceed exactly as documented
+below.
+
 ## Output — what you produce
 
 A markdown findings table for insertion into § 2.2 of the self-audit handoff:
