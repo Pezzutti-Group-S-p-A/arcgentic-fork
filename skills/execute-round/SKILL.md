@@ -21,6 +21,11 @@ Requires the `arcgentic` CLI:
 - Stable: `pipx install arcgentic`
 - Dev: `cd toolkit && pip install -e ".[dev]"`
 
+Optional: set `ARCGENTIC_OCR_PREFILTER=1` (with `ocr` installed and its
+Anthropic key supplied via `pzt-secret`) to enable the ocr pre-filter on the
+inline CR step. See README.md § "ocr pre-filter" for setup. Unset by
+default — no behavior change if you skip this.
+
 Requires a planned handoff doc — run `/plan-round` first if missing.
 
 V1 projects must resolve the session-mode gate before implementation. If
