@@ -36,11 +36,21 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from arcgentic.adapters._local_env import shquote
+
 # ── Constants ──────────────────────────────────────────────────────────
 
 _RECOGNIZED_PREFIXES = ("cd ", "git ", "uv run ", "bash ", "arcgentic ")
-_FACT_TABLE_HEADER_RE = re.compile(
-    r"\s*\|\s*#\s*\|\s*Command\s*\|\s*Expected\s*\|\s*Comment\s*\|\s*"
+# Two header shapes are in the wild: the 4-column one this module has always
+# parsed, and the 5-column one `verdict-template.md` § 7 actually documents
+# (`# | Fact | Command | Expected | Actual`). Both must parse.
+_FACT_TABLE_HEADER_4COL_RE = re.compile(
+    r"\s*\|\s*#\s*\|\s*Command\s*\|\s*Expected\s*\|\s*(?:Comment|Actual)\s*\|\s*",
+    re.IGNORECASE,
+)
+_FACT_TABLE_HEADER_5COL_RE = re.compile(
+    r"\s*\|\s*#\s*\|\s*Fact\s*\|\s*Command\s*\|\s*Expected\s*\|\s*Actual\s*\|\s*",
+    re.IGNORECASE,
 )
 _VACUOUS_PATTERNS = ["≥", ">=", "<=", "≤"]
 _MUTABLE_STATE_PATTERNS = (
@@ -116,6 +126,7 @@ def parse_facts(audit_md: str) -> list[Fact]:
     lines = audit_md.splitlines()
     in_table = False
     in_section_7 = False
+    five_col = False  # which header shape is active for the table currently being parsed
 
     for line_no, ln in enumerate(lines, start=1):
         # Strip leading whitespace for header detection (handles indented markdown in raw strings)
@@ -132,8 +143,13 @@ def parse_facts(audit_md: str) -> list[Fact]:
             continue
 
         # Detect table header to start parsing rows
-        if _FACT_TABLE_HEADER_RE.match(lns):
+        if _FACT_TABLE_HEADER_5COL_RE.match(lns):
             in_table = True
+            five_col = True
+            continue
+        if _FACT_TABLE_HEADER_4COL_RE.match(lns):
+            in_table = True
+            five_col = False
             continue
         if in_table and re.match(r"\s*\|\s*[-:]+\s*\|", lns):
             # Header separator row — skip
@@ -145,7 +161,8 @@ def parse_facts(audit_md: str) -> list[Fact]:
                 # Table ended (blank or non-table line)
                 in_table = False
                 continue
-            # Parse row: | # | Command | Expected | Comment |
+            # Parse row: | # | Command | Expected | Comment | (4-col)
+            # or:        | # | Fact | Command | Expected | Actual | (5-col)
             # Temporarily replace escaped pipes \| with a sentinel BEFORE splitting on |,
             # so that `git log \| wc -l` doesn't become extra columns.
             _pipe_sentinel = "\x00PIPE\x00"
@@ -153,9 +170,14 @@ def parse_facts(audit_md: str) -> list[Fact]:
             cells_raw = [c.strip() for c in safe_line.strip("|").split("|")]
             # Restore sentinel back to | in each cell
             cells = [c.replace(_pipe_sentinel, "|") for c in cells_raw]
-            if len(cells) < 4:
-                continue
-            idx_str, cmd, expected, comment = cells[0], cells[1], cells[2], cells[3]
+            if five_col:
+                if len(cells) < 4:
+                    continue
+                idx_str, comment, cmd, expected = cells[0], cells[1], cells[2], cells[3]
+            else:
+                if len(cells) < 4:
+                    continue
+                idx_str, cmd, expected, comment = cells[0], cells[1], cells[2], cells[3]
             try:
                 idx = int(idx_str)
             except ValueError:
@@ -203,9 +225,15 @@ def execute_fact(
         )
 
     cwd = str(repo_root) if repo_root else None
+    # Fact commands are authored bash-style (POSIX paths, `&&` chains, `cd /c/...`).
+    # subprocess.run(shell=True) invokes cmd.exe on win32, which cannot parse any
+    # of that — route through bash there so the command runs as written everywhere.
+    command_to_run = fact.command
+    if sys.platform == "win32":
+        command_to_run = f"bash -lc {shquote(fact.command)}"
     try:
         result = subprocess.run(
-            fact.command,
+            command_to_run,
             shell=True,
             capture_output=True,
             text=True,
@@ -230,7 +258,9 @@ def execute_fact(
         status="FAIL",
         actual=actual,
         error=(
-            f"expected `{fact.expected}`, got `{actual}` "
+            f"expected `{fact.expected}`, got `{actual}` — the Expected column must be "
+            f"the exact stdout the command produces (strict string equality), not a "
+            f"human-readable description of it "
             f"(stderr: {result.stderr.strip()[:200]})"
         ),
     )
@@ -246,17 +276,26 @@ def check_ac1_clause_a(audit_md: str, fact_count: int) -> list[str]:
     Returns list of violation strings (empty if compliant).
     """
     violations: list[str] = []
-    # Match patterns like "all N facts pass" / "N/N PASS" / "verified N mechanical facts"
-    verdict_match = re.search(
-        r"(\d+)\s*(?:/\s*(\d+))?\s*(?:PASS|verified|facts)", audit_md, re.IGNORECASE
+    # Match patterns like "all N facts pass" / "N/N PASS" / "verified N mechanical facts".
+    # A bare `re.search` grabs whatever such phrase appears FIRST in the doc, which is
+    # frequently unrelated prose quoted as fact-table evidence (e.g. a pytest "44 passed"
+    # line cited inside § 7, well before the real § 8 verdict summary). Collect every
+    # match instead and prefer the fraction form (`N/M ...`), which is the shape a real
+    # verdict claim actually takes; among ties, the LAST match wins, since the verdict
+    # section comes after the fact table it's summarizing.
+    matches = list(
+        re.finditer(r"(\d+)\s*(?:/\s*(\d+))?\s*(?:PASS|verified|facts)", audit_md, re.IGNORECASE)
     )
-    if verdict_match:
-        claimed = int(verdict_match.group(1))
-        if claimed != fact_count:
-            violations.append(
-                f"AC-1 Clause A: verdict mentions {claimed} facts "
-                f"but § 7 table has {fact_count} rows"
-            )
+    if not matches:
+        return violations
+    fraction_matches = [m for m in matches if m.group(2) is not None]
+    chosen = fraction_matches[-1] if fraction_matches else matches[-1]
+    claimed = int(chosen.group(1))
+    if claimed != fact_count:
+        violations.append(
+            f"AC-1 Clause A: verdict mentions {claimed} facts "
+            f"but § 7 table has {fact_count} rows"
+        )
     return violations
 
 

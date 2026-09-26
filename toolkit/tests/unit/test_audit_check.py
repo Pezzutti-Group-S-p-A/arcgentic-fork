@@ -7,6 +7,7 @@ They verify parse_facts, execute_fact, check_ac1_clause_*, check_ac3, run(), mai
 from __future__ import annotations
 
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -191,6 +192,27 @@ def test_parse_facts_skips_non_numeric_index_row() -> None:
     assert facts[0].index == 1
 
 
+def test_parse_facts_5col_header_matches_verdict_template() -> None:
+    # skills/audit-round/references/verdict-template.md § 7 documents this exact
+    # 5-column shape (`# | Fact | Command | Expected | Actual`); the 4-column-only
+    # header regex used to parse it as 0 rows, silently.
+    md = textwrap.dedent("""\
+        ## § 7. Mechanical audit facts
+
+        | # | Fact | Command | Expected | Actual |
+        |---|---|---|---|---|
+        | 1 | Handoff exists | `git cat-file -e abc123` | `exit 0` | exit 0 |
+        | 2 | Test count | `bash run_tests.sh` | `42 passed` | 42 passed |
+    """)
+    facts = parse_facts(md)
+    assert len(facts) == 2
+    assert facts[0].index == 1
+    assert facts[0].command == "git cat-file -e abc123"
+    assert facts[0].expected == "exit 0"
+    assert facts[0].comment == "Handoff exists"
+    assert facts[1].expected == "42 passed"
+
+
 def test_parse_facts_stops_at_next_section() -> None:
     md = textwrap.dedent("""\
         ## § 7. Mechanical audit facts
@@ -288,6 +310,23 @@ def test_execute_fact_arcgentic_prefix_recognized() -> None:
     assert result.status == "PASS"
 
 
+def test_execute_fact_posix_style_cd_path_runs_unmocked(tmp_path: Path) -> None:
+    # audit facts are authored bash-style; on win32, subprocess.run(shell=True) used to
+    # invoke cmd.exe directly, which cannot parse POSIX `cd /c/...` chains at all —
+    # every such fact would FAIL regardless of correctness. Not mocked: exercises the
+    # real platform-specific execution path (bash on win32, native shell elsewhere).
+    marker = tmp_path / "marker.txt"
+    posix_dir = "/" + str(tmp_path.as_posix()).lstrip("/")
+    if sys.platform == "win32":
+        # tmp_path is e.g. C:\... -> POSIX form under git-bash is /c/...
+        drive, rest = str(tmp_path).split(":", 1)
+        posix_dir = f"/{drive.lower()}{rest.replace(chr(92), '/')}"
+    fact = _make_fact(command=f"cd {posix_dir} && echo hello > marker.txt", expected="")
+    result = execute_fact(fact)
+    assert result.status in ("PASS", "FAIL")  # not SKIP — prefix is recognized
+    assert marker.exists()
+
+
 def test_execute_fact_cd_prefix_recognized() -> None:
     with patch("arcgentic.audit_check.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(stdout="ok\n", stderr="", returncode=0)
@@ -319,6 +358,34 @@ def test_check_ac1_clause_a_no_pattern_no_violation() -> None:
     md = "STATUS: DONE.\n"
     violations = check_ac1_clause_a(md, fact_count=5)
     assert violations == []
+
+
+def test_check_ac1_clause_a_ignores_earlier_unrelated_count(tmp_path: Path) -> None:
+    # A bare `re.search` used to grab the FIRST "N ... passed/facts" phrase anywhere in
+    # the doc — including unrelated evidence quoted inside a § 7 fact row, like a pytest
+    # summary line ("44 passed") cited well before the real § 8 verdict claim. The real
+    # verdict (3/3 PASS) appears later and must be the one checked, not the red herring.
+    md = textwrap.dedent("""\
+        ## § 7. Mechanical audit facts
+
+        | # | Command | Expected | Comment |
+        |---|---|---|---|
+        | 1 | `bash run_tests.sh` | `44 passed` | pytest evidence, unrelated count |
+
+        ## § 8. Verdict
+
+        3/3 PASS all facts verified.
+    """)
+    violations = check_ac1_clause_a(md, fact_count=3)
+    assert violations == []
+
+
+def test_check_ac1_clause_a_fraction_form_preferred_over_earlier_plain_number() -> None:
+    md = "44 passed in the test run. Verdict: 2/5 PASS.\n"
+    violations = check_ac1_clause_a(md, fact_count=5)
+    assert len(violations) == 1
+    assert "2" in violations[0]
+    assert "5" in violations[0]
 
 
 # ── check_ac1_clause_b ─────────────────────────────────────────────────
